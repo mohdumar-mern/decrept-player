@@ -1,78 +1,112 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
+// Use Web Crypto API
+const crypto = window.crypto || window.msCrypto;
+console.log(crypto)
 export default function VideoPlayer() {
   const [videoURL, setVideoURL] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
-  // XOR Decryption function (must match backend key)
-  const decryptVideo = (data) => {
-    const key = [0x5f, 0x2a, 0x7b];
-    const decrypted = new Uint8Array(data);
-    for (let i = 0; i < decrypted.length; i++) {
-      decrypted[i] = decrypted[i] ^ key[i % key.length];
-    }
-    return decrypted;
-  };
+  // Decryption function using Web Crypto API
+  async function decryptVideo(encryptedBuffer, keyHex) {
 
-  // Validate decrypted data (basic check to see if MP4 header is valid)
+    const keyBytes = new Uint8Array(
+      keyHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16))
+    );
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "AES-CBC", length: 256 },
+      false,
+      ["decrypt"]
+    );
+    const iv = encryptedBuffer.slice(0, 16);
+    const encryptedData = encryptedBuffer.slice(16);
+
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-CBC", iv },
+      key,
+      encryptedData
+    );
+    return new Uint8Array(decrypted);
+  }
+
+  // Check if it's a valid MP4 file
   const isValidMP4 = (buffer) => {
-    const mp4Header = [0x00, 0x00, 0x00]; // simplified check
-    return buffer[0] === 0x00 || buffer[0] === 0x1A || buffer[4] === 0x66; // 'f' in 'ftyp'
+    const view = new Uint8Array(buffer);
+    const signature = String.fromCharCode(...view.slice(4, 8));
+    return signature === "ftyp";
   };
 
-  const handleUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) {
-      alert("❌ Please select a video file.");
-      return;
-    }
+  // Fetch and decrypt video
+  const fetchAndPlayVideo = async (filename) => {
+    try {
+      const res = await fetch(`http://localhost:8080/api/videos/${filename}`);
+      const data = await res.json();
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const buffer = new Uint8Array(event.target.result);
+      if (res.ok) {
+        const encryptedBuffer = Uint8Array.from(atob(data.video), c => c.charCodeAt(0)); // Decode base64
+        console.log(encryptedBuffer)
 
-      try {
-        // Try decrypting
-        const decrypted = decryptVideo(buffer);
+        const decrypted = await decryptVideo(encryptedBuffer, data.key);
+
         if (isValidMP4(decrypted)) {
           const blob = new Blob([decrypted], { type: "video/mp4" });
           const url = URL.createObjectURL(blob);
           setVideoURL(url);
+          setMessage("✅ Video decrypted and loaded successfully.");
         } else {
-          // fallback to original file
-          const blob = new Blob([buffer], { type: "video/mp4" });
-          const url = URL.createObjectURL(blob);
-          setVideoURL(url);
+          throw new Error("Decrypted data is not a valid MP4");
         }
-      } catch (err) {
-        console.warn("Fallback to original file:", err);
-        const blob = new Blob([buffer], { type: "video/mp4" });
-        const url = URL.createObjectURL(blob);
-        setVideoURL(url);
+      } else {
+        throw new Error(data.message || "Failed to fetch video");
       }
-    };
-
-    reader.readAsArrayBuffer(file);
+    } catch (err) {
+      setError(`❌ ${err.message}`);
+      setVideoURL("");
+    }
   };
+
+  // Handle file upload (for local encrypted files)
+  const handleUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) {
+      setError("❌ Please select a video file.");
+      return;
+    }
+    console.log(file.name)
+    fetchAndPlayVideo(file.name);
+
+  };
+
+  // Cleanup URL on unmount
+  useEffect(() => {
+    return () => {
+      if (videoURL) URL.revokeObjectURL(videoURL);
+    };
+  }, [videoURL]);
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-100 px-4">
       <div className="bg-white shadow-xl rounded-lg p-6 max-w-xl w-full">
         <h2 className="text-2xl font-semibold text-center mb-4">
-          🎥 Upload & Play Video (Encrypted or Normal)
+          🎥 Upload or Fetch & Play Encrypted Video
         </h2>
-
         <input
           type="file"
           accept="video/*"
           onChange={handleUpload}
-          className="block w-full text-sm text-gray-700 
-            file:mr-4 file:py-2 file:px-4 
-            file:rounded-full file:border-0 
-            file:text-sm file:font-semibold 
-            file:bg-blue-500 file:text-white 
-            hover:file:bg-blue-600"
+          className="block w-full text-sm text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-500 file:text-white hover:file:bg-blue-600 mb-4"
         />
-
+        <button
+          onClick={() => handleUpload} // Replace with actual filename
+          className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 mb-4"
+        >
+          Fetch Video
+        </button>
+        {message && <p className="text-green-500 mt-2">{message}</p>}
+        {error && <p className="text-red-500 mt-2">{error}</p>}
         {videoURL ? (
           <div className="mt-6">
             <video
